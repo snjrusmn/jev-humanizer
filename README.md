@@ -23,7 +23,7 @@
 
 Искать слоп модели не нужно. Это делает [Jev](https://typesafe.ai) от TypeSafe AI, классификатор, который не пишет текст и отвечает только вероятностями. Он проверяет каждый абзац на 35 смысловых паттернов, линтер добавляет механику вроде тире и стрелок. Модель получает таблицу находок и правит только отмеченные места. Свои любимые обороты она не замечает, а классификатор замечает, и стоит это меньше цента за пост.
 
-Справочник и линтер пока знают только русский, а Jev читает и английский. На примере из blader/humanizer он поймал «not just X, it's Y», длинное тире и эмодзи, но пропустил «Let that sink in» и риторический вопрос.
+Добавлен английский режим. Он берёт паттерны из [humanizer](https://github.com/blader/humanizer) от blader и включается сам, когда кириллицы в тексте меньше трети букв.
 
 ## Установка
 
@@ -63,6 +63,7 @@ python3 -m jev_humanizer.audit текст.md               # таблица на
 python3 -m jev_humanizer.audit текст.md --sections    # плюс выдержки из справочника
 python3 -m jev_humanizer.audit текст.md --json a.json # все оценки и расход токенов
 python3 -m jev_humanizer.audit текст.md --no-jev      # только локальный линтер
+python3 -m jev_humanizer.audit text.md --lang en      # язык явно: ru или en
 ```
 
 
@@ -106,23 +107,25 @@ flowchart LR
 | Путь | Что там |
 | --- | --- |
 | [`skill/SKILL.md`](skill/SKILL.md) | скилл для модели: режимы, фазы, запреты, голос |
-| [`jev_humanizer/`](jev_humanizer) | аудит: линтер humanizer-ru плюс Jev по абзацам |
+| [`jev_humanizer/`](jev_humanizer) | аудит: линтеры и Jev по абзацам |
 | [`vendor/humanizer-ru/`](vendor/humanizer-ru) | humanizer-ru v1.7 без изменений |
+| [`vendor/humanizer-en/`](vendor/humanizer-en) | humanizer от blader без изменений, справочник английского режима |
+| [`knowledge/`](knowledge) | правила владельца для английского режима |
 | [`tests/`](tests) | тесты аудита, `python3 -m unittest discover -s tests` |
 
 ## Источники
 
-- [humanizer](https://github.com/blader/humanizer) от [@blader](https://github.com/blader) - основа всей линии
+- [humanizer](https://github.com/blader/humanizer) от [@blader](https://github.com/blader) - основа всей линии. Копия лежит в `vendor/humanizer-en` без изменений (коммит `a32f244`)
 - [Wikipedia: Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), на котором построен humanizer
 - [humanizer-ru](https://github.com/smixs/humanizer-ru) от Serge Shima - русская адаптация, отсюда 38 паттернов и линтер. Копия лежит в `vendor/humanizer-ru` без изменений (v1.7, коммит `ff990df`)
 - [Jev](https://typesafe.ai) от TypeSafe AI - классификатор для аудита
 
-Если нужен редактор без внешнего API, берите humanizer-ru. Для английского текста лучше подойдёт humanizer от blader.
+Если нужен редактор без внешнего API, берите humanizer-ru, а для английского humanizer от blader.
 
 ## Лицензия
 
-[MIT](LICENSE). `vendor/humanizer-ru` распространяется под MIT © 2026 Serge Shima.
+[MIT](LICENSE). `vendor/humanizer-ru` распространяется под MIT © 2026 Serge Shima, `vendor/humanizer-en` под MIT © 2025 Siqi Chen.
 
 ## In English
 
-jev-humanizer is an anti-slop skill for AI agents (Claude Code, Codex, anything that reads `SKILL.md`). Detection runs on [Jev](https://typesafe.ai) by TypeSafe AI, a classifier that scores every paragraph against 35 semantic patterns for under a cent per post, and the host model rewrites only what was flagged. The pattern reference and the linter come from [smixs/humanizer-ru](https://github.com/smixs/humanizer-ru), a Russian adaptation of [blader/humanizer](https://github.com/blader/humanizer), so today the tool is tuned for Russian. Jev reads English too and catches structural tells such as "not just X, it's Y". In the author's own blind rating, writing with it from the first draft scored 83 out of 100 against 33 for humanizer-ru and took about a minute and a half per text instead of three. A public blind test is open at [jh-blindtest.snjr.uz](https://jh-blindtest.snjr.uz); results will be added here.
+jev-humanizer is an anti-slop skill for AI agents (Claude Code, Codex, anything that reads `SKILL.md`). Detection runs on [Jev](https://typesafe.ai) by TypeSafe AI, a classifier that scores every paragraph against 35 semantic patterns for under a cent per post, and the host model rewrites only what was flagged. The pattern reference and the linter come from [smixs/humanizer-ru](https://github.com/smixs/humanizer-ru), a Russian adaptation of [blader/humanizer](https://github.com/blader/humanizer), and the tool was built for Russian first. In the author's own blind rating, writing with it from the first draft scored 83 out of 100 against 33 for humanizer-ru and took about a minute and a half per text instead of three. A public blind test is open at [jh-blindtest.snjr.uz](https://jh-blindtest.snjr.uz); results will be added here. An English mode has been added: it uses the patterns of blader/humanizer and turns on by itself when less than a third of the letters are Cyrillic.

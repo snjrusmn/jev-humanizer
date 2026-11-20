@@ -1,0 +1,1 @@
+humanizer от Siqi Chen (@blader, MIT), https://github.com/blader/humanizer, коммит a32f244 (v4.0.0 и раздел Unreleased из CHANGELOG, 19.11.2026), скопирован 20.11.2026. Копия без изменений, файлы из `git archive` коммита. Аудит берёт выдержки для `--sections` из SKILL.md по заголовкам «### N.».

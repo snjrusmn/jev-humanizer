@@ -1,6 +1,7 @@
 """CLI аудита; JSON сохраняет все оценки, порог влияет только на показ.
 
-python3 -m jev_humanizer.audit текст.md --json audit.json --sections
+python3 -m jev_humanizer.audit текст.md --json audit.json --sections [--lang ru|en]
+Язык без --lang — по доле кириллицы среди букв вне кода и ссылок.
 Клиент подменяется через audit_text(..., client=callable(state, questions)).
 Абзацы нумеруются с 1; paragraph=null обозначает документную находку.
 Цена — оценка по входным токенам; тариф выходных токенов не задан.
@@ -21,23 +22,45 @@ import time
 import urllib.error
 import urllib.request
 
-from .patterns import (
-    DOCUMENT_PATTERNS, LINT_PATTERN_NUMBERS, PARAGRAPH_PATTERNS, questions,
-)
+from . import lint_en, owner_rules, patterns, patterns_en
+from .patterns import questions
 
 VENDOR = Path(__file__).resolve().parents[1] / "vendor" / "humanizer-ru"
 PATTERNS_PATH = VENDOR / "references" / "patterns.md"
+VENDOR_EN = VENDOR.parent / "humanizer-en"
 API_URL = "https://api.typesafe.ai/v1/systemone"
 INPUT_USD_PER_MILLION = 0.042
 
 
 @lru_cache(maxsize=1)
-def vendor_lint():
+def vendor_module():
     """Загружаем эталон без изменения sys.path и копирования правил."""
     spec = importlib.util.spec_from_file_location("humanizer_ru_lint", VENDOR / "scripts" / "lint.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.lint
+    return module
+
+
+def vendor_lint():
+    return vendor_module().lint
+
+
+# Справочник для --sections, вопросы к Jev и линтер по языку.
+LANGS = {
+    "ru": {"patterns": patterns, "reference": PATTERNS_PATH,
+           "lint": lambda text: vendor_lint()(text)},
+    "en": {"patterns": patterns_en, "reference": VENDOR_EN / "SKILL.md",
+           "lint": lambda text: lint_en.lint(text, vendor_module())},
+}
+NOT_PROSE = re.compile(r"```.*?```|`[^`\n]+`|https?://\S+", re.S)
+
+
+def detect_language(text):
+    """ru, если кириллица — хотя бы треть букв вне кода и ссылок: русский текст
+    с латинскими брендами и сокращениями остаётся русским. Пустой текст тоже ru."""
+    letters = [c for c in NOT_PROSE.sub(" ", text) if c.isalpha()]
+    cyrillic = sum("\u0400" <= c <= "\u04ff" for c in letters)
+    return "ru" if cyrillic * 3 >= len(letters) else "en"
 
 
 def split_paragraphs(text):
@@ -117,11 +140,13 @@ def extract_sections(numbers, path=PATTERNS_PATH):
     return "\n\n".join(sections)
 
 
-def lint_findings(text, paragraphs):
+def lint_findings(text, paragraphs, lang="ru"):
     result = []
-    for level, line, rule, excerpt in vendor_lint()(text):
+    numbers = LANGS[lang]["patterns"].LINT_PATTERN_NUMBERS
+    raw = LANGS[lang]["lint"](text) + owner_rules.lint(text, lang, vendor_module())
+    for level, line, rule, excerpt in raw:
         match = re.match(r"^(\d+)\b", rule)
-        number = int(match[1]) if match else LINT_PATTERN_NUMBERS.get(rule)
+        number = int(match[1]) if match else numbers.get(rule)
         paragraph = next((p["number"] for p in paragraphs
                           if p["start_line"] <= line <= p["end_line"]), None)
         result.append({"paragraph": paragraph, "pattern": number, "name": rule,
@@ -130,26 +155,38 @@ def lint_findings(text, paragraphs):
     return result
 
 
-def make_jobs(text, paragraphs):
+def document_state(scope, text, paragraphs):
+    """opening — две первые строки, outline — первые предложения от пяти абзацев,
+    document — весь текст. None — паттерн к этому тексту не применяется."""
+    if scope == "opening":
+        opening = [line.strip() for line in text.splitlines() if line.strip()][:2]
+        return {"opening": opening} if len(opening) == 2 else None
+    if scope == "outline":
+        if len(paragraphs) < 5:
+            return None
+        return {"first_sentences": [re.split(r"(?<=[.!?…])\s+", p["text"], maxsplit=1)[0]
+                                    for p in paragraphs]}
+    return {"document": text.strip()} if paragraphs else None
+
+
+def make_jobs(text, paragraphs, lang="ru"):
+    module = LANGS[lang]["patterns"]
     jobs = []
     for index, paragraph in enumerate(paragraphs):
         jobs.append({
-            "paragraph": paragraph["number"], "patterns": PARAGRAPH_PATTERNS,
+            "paragraph": paragraph["number"], "patterns": module.PARAGRAPH_PATTERNS,
             "state": {"paragraph": paragraph["text"], "paragraph_number": paragraph["number"],
                       "paragraph_count": len(paragraphs),
                       "previous_paragraph": paragraphs[index - 1]["text"] if index else None},
             "excerpt": paragraph["text"][:120],
         })
-    opening = [line.strip() for line in text.splitlines() if line.strip()][:2]
-    if len(opening) == 2:
-        jobs.append({"paragraph": None, "patterns": [DOCUMENT_PATTERNS[0]],
-                     "state": {"opening": opening}, "excerpt": " / ".join(opening)[:120]})
-    if len(paragraphs) >= 5:
-        first_sentences = [re.split(r"(?<=[.!?…])\s+", p["text"], maxsplit=1)[0]
-                           for p in paragraphs]
-        jobs.append({"paragraph": None, "patterns": [DOCUMENT_PATTERNS[1]],
-                     "state": {"first_sentences": first_sentences},
-                     "excerpt": " / ".join(first_sentences)[:120]})
+    for pattern in module.DOCUMENT_PATTERNS:
+        state = document_state(pattern["scope"], text, paragraphs)
+        if state is not None:
+            value = next(iter(state.values()))
+            excerpt = value if isinstance(value, str) else " / ".join(value)
+            jobs.append({"paragraph": None, "patterns": [pattern], "state": state,
+                         "excerpt": excerpt[:120]})
     return jobs
 
 
@@ -178,16 +215,20 @@ def validate_response(response, job):
     return findings
 
 
-def audit_text(text, *, threshold=0.5, no_jev=False, client=None):
-    """Полный отчёт. Подменённый клиент должен допускать вызовы из четырёх потоков."""
+def audit_text(text, *, threshold=0.5, no_jev=False, client=None, lang=None):
+    """Полный отчёт. Подменённый клиент должен допускать вызовы из четырёх потоков.
+    lang=None — язык определяется по тексту."""
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("Порог должен быть числом от 0 до 1.")
     text = text.lstrip("\ufeff")
+    lang = lang or detect_language(text)
+    if lang not in LANGS:
+        raise ValueError(f"Язык {lang!r} не поддерживается: ru или en.")
     paragraphs = split_paragraphs(text)
-    findings = lint_findings(text, paragraphs)
+    findings = lint_findings(text, paragraphs, lang)
     requests = []
     usage = {"input_tokens": 0, "output_tokens": 0}
-    jobs = make_jobs(text, paragraphs) if not no_jev else []
+    jobs = make_jobs(text, paragraphs, lang) if not no_jev else []
     if jobs:
         if client is None:
             api_key = load_api_key()
@@ -208,7 +249,7 @@ def audit_text(text, *, threshold=0.5, no_jev=False, client=None):
                                  "patterns": [p["number"] for p in job["patterns"]],
                                  "response": response})
     return {
-        "schema_version": 1, "threshold": threshold, "jev_enabled": not no_jev,
+        "schema_version": 1, "lang": lang, "threshold": threshold, "jev_enabled": not no_jev,
         "paragraphs": paragraphs, "findings": findings, "requests": requests,
         "usage": usage, "cost_usd": usage["input_tokens"] * INPUT_USD_PER_MILLION / 1_000_000,
         "cost_basis": {"input_usd_per_million": INPUT_USD_PER_MILLION, "output_price_included": False},
@@ -243,25 +284,27 @@ def render_markdown(report, *, sections=False):
                   f"Цена по входным токенам: ${report['cost_usd']:.8f} "
                   f"(${INPUT_USD_PER_MILLION} за миллион; тариф выхода не задан)."])
     if sections:
-        extracted = extract_sections(f["pattern"] for f in found if f["pattern"] is not None)
+        extracted = extract_sections((f["pattern"] for f in found if f["pattern"] is not None),
+                                     LANGS[report.get("lang", "ru")]["reference"])
         if extracted:
             lines.extend(["", extracted])
     return "\n".join(lines)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Аудит русского текста: humanizer-ru + Jev")
+    parser = argparse.ArgumentParser(description="Аудит текста: humanizer-ru или humanizer (en) + Jev")
     parser.add_argument("file", help="Путь к тексту или - для stdin")
     parser.add_argument("--json", metavar="OUT", type=Path, help="Сохранить все оценки и usage")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--sections", action="store_true")
     parser.add_argument("--no-jev", action="store_true", help="Только локальный линтер")
+    parser.add_argument("--lang", choices=sorted(LANGS), help="Язык текста; без флага — по доле кириллицы")
     args = parser.parse_args(argv)
     if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
         parser.error("--threshold должен быть числом от 0 до 1")
     try:
         text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8-sig")
-        report = audit_text(text, threshold=args.threshold, no_jev=args.no_jev)
+        report = audit_text(text, threshold=args.threshold, no_jev=args.no_jev, lang=args.lang)
         output = render_markdown(report, sections=args.sections)
         if args.json:
             args.json.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
